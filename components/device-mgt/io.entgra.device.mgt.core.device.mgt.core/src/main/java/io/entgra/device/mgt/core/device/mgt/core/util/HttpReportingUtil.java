@@ -70,6 +70,7 @@ public class HttpReportingUtil {
                 case Constants.BirtReporting.APP_USAGE:
                 case Constants.BirtReporting.DEVICE_INFO:
                 case Constants.BirtReporting.LOCATION_INFO:
+                case Constants.BirtReporting.ENROLLMENT_TYPE:
                     return designFile += Constants.BirtReporting.BIRT_RPT_DESIGN_EXT;
             }
         }
