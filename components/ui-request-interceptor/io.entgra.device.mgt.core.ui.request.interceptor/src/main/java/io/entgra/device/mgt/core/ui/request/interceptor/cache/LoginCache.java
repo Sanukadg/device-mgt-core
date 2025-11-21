@@ -62,4 +62,13 @@ public class LoginCache {
         }
         return oAuthApp;
     }
+
+    /**
+     * Removes OAuth app from cache
+     *
+     * @param oAuthAppCacheKey - The key to identify the cache entry to remove
+     */
+    public void removeOAuthAppFromCache(OAuthAppCacheKey oAuthAppCacheKey) {
+        cache.remove(oAuthAppCacheKey);
+    }
 }

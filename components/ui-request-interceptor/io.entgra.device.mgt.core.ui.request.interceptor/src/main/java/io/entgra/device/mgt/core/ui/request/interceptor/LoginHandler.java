@@ -373,10 +373,29 @@ public class LoginHandler extends HttpServlet {
                     applicationName.substring(0, applicationName.indexOf(HandlerConstants.LOGIN_SUFFIX)) +
                             HandlerConstants.TENANT_CONTEXT_SUFFIX;
             OAuthAppCacheKey oAuthTenantAppCacheKey = new OAuthAppCacheKey(tenantApplicationName, username);
-            OAuthApp oAuthTenantApp = loginCache.getOAuthAppCache(oAuthTenantAppCacheKey);
+
+            // Check if this is a fresh login (no existing tenant auth data in session)
+            HttpSession session = req.getSession(false);
+            boolean isFreshLogin = session != null &&
+                    session.getAttribute(HandlerConstants.SESSION_TENANT_CONTEXT_AUTH_DATA_KEY) == null;
+
+            OAuthApp oAuthTenantApp = null;
+
+            // If fresh login, invalidate cache to get latest OAuth app state
+            // This handles the case where Publisher may have modified the OAuth app
+            if (isFreshLogin) {
+                log.debug("Fresh login detected, invalidating tenant OAuth app cache for: " + tenantApplicationName);
+                loginCache.removeOAuthAppFromCache(oAuthTenantAppCacheKey);
+            }
+
+            // Try to get from cache
+            oAuthTenantApp = loginCache.getOAuthAppCache(oAuthTenantAppCacheKey);
+
             if (oAuthTenantApp == null) {
+                // Not in cache or was invalidated - register/fetch fresh
                 oAuthTenantApp = registerTenantApp(tenantApplicationName, tags, resp,
                         oAuthTenantAppCacheKey, loginCache);
+
                 if (oAuthTenantApp != null) {
                     getTokenAndPersistInSession(req, resp, username, oAuthTenantApp.getClientId(),
                             oAuthTenantApp.getClientSecret(), oAuthTenantApp.getEncodedClientApp(), scopes,
@@ -387,6 +406,8 @@ public class LoginHandler extends HttpServlet {
                     throw new LoginException(msg);
                 }
             } else {
+                // Found in cache - use cached credentials
+                log.debug("Using cached tenant OAuth app for: " + tenantApplicationName);
                 getTokenAndPersistInSession(req, resp, username, oAuthTenantApp.getClientId(),
                         oAuthTenantApp.getClientSecret(), oAuthTenantApp.getEncodedClientApp(),
                         scopes, HandlerConstants.SESSION_TENANT_CONTEXT_AUTH_DATA_KEY);
