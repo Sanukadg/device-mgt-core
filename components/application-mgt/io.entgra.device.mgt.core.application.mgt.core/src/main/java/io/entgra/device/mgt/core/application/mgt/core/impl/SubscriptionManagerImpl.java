@@ -19,11 +19,14 @@
 package io.entgra.device.mgt.core.application.mgt.core.impl;
 
 import com.google.gson.Gson;
+import io.entgra.device.mgt.core.application.mgt.common.AppOperation;
 import io.entgra.device.mgt.core.application.mgt.common.ApplicationInstallResponse;
 import io.entgra.device.mgt.core.application.mgt.common.ApplicationSubscriptionInfo;
+import io.entgra.device.mgt.core.application.mgt.common.ApplicationSubscriptionInfoWrapper;
 import io.entgra.device.mgt.core.application.mgt.common.ApplicationType;
 import io.entgra.device.mgt.core.application.mgt.common.CategorizedSubscriptionResult;
 import io.entgra.device.mgt.core.application.mgt.common.DeviceSubscriptionData;
+import io.entgra.device.mgt.core.application.mgt.common.DeviceWithSubscriptionStatus;
 import io.entgra.device.mgt.core.application.mgt.common.SubscriptionInfo;
 import io.entgra.device.mgt.core.application.mgt.common.SubscriptionResponse;
 import io.entgra.device.mgt.core.application.mgt.common.SubscriptionStatistics;
@@ -178,17 +181,145 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
         }
 
         validateRequest(params, subType, action);
-        //todo validate users, groups and roles
         ApplicationDTO applicationDTO = getApplicationDTO(applicationUUID);
+
         ApplicationSubscriptionInfo applicationSubscriptionInfo = getAppSubscriptionInfo(applicationDTO, subType,
                 params);
+        ApplicationSubscriptionInfoWrapper subscriptionInfoWrapper = getFilteredSubscriptionInfo(applicationSubscriptionInfo, action, applicationUUID);
         performExternalStoreSubscription(applicationDTO, applicationSubscriptionInfo);
         ApplicationInstallResponse applicationInstallResponse = performActionOnDevices(
                 applicationSubscriptionInfo.getAppSupportingDeviceTypeName(), applicationSubscriptionInfo.getDevices(),
                 applicationDTO, subType, applicationSubscriptionInfo.getSubscribers(), action, properties, isOperationReExecutingDisabled);
 
         applicationInstallResponse.setErrorDeviceIdentifiers(applicationSubscriptionInfo.getErrorDeviceIdentifiers());
+
+        if (applicationInstallResponse.getIgnoredDeviceIdentifiers() == null) {
+            applicationInstallResponse.setIgnoredDeviceIdentifiers(subscriptionInfoWrapper.getIgnoredDevices());
+        } else {
+            applicationInstallResponse.getIgnoredDeviceIdentifiers().addAll(subscriptionInfoWrapper.getIgnoredDevices());
+        }
+
+        if (applicationInstallResponse.getActivities() == null) {
+            applicationInstallResponse.setActivities(subscriptionInfoWrapper.getPendingActivities());
+        } else {
+            applicationInstallResponse.getActivities().addAll(subscriptionInfoWrapper.getPendingActivities());
+        }
+
         return applicationInstallResponse;
+    }
+
+    /**
+     * Filter devices which are already having same requesting app INSTALL or UNINSTALL operation.
+     *
+     * @param applicationSubscriptionInfo {@link ApplicationSubscriptionInfo}
+     * @param action                      Action ex: (INSTALL or UNINSTALL)
+     * @param applicationUUID             Application release UUID
+     * @return {@link ApplicationSubscriptionInfoWrapper}
+     * @throws ApplicationManagementException Throws when error encountered while getting subscription details.
+     */
+    private ApplicationSubscriptionInfoWrapper getFilteredSubscriptionInfo(ApplicationSubscriptionInfo applicationSubscriptionInfo
+            , String action, String applicationUUID) throws ApplicationManagementException {
+        // Check for the PENDING and IN_PROGRESS activities associated with the device identifiers for the release UUID
+        List<Activity> pendingActivities = new ArrayList<>();
+        List<Device> proceedingDevices = new ArrayList<>();
+        List<DeviceWithSubscriptionStatus> ignoredDevices = new ArrayList<>();
+        List<DeviceOperationDTO> existingOperations;
+        for (Device device : applicationSubscriptionInfo.getDevices()) {
+            existingOperations = getSubscriptionOperationsByUUIDAndDeviceID(device.getId(), applicationUUID);
+            if (existingOperations != null && !existingOperations.isEmpty()) {
+                for (DeviceOperationDTO existingOperation : existingOperations) {
+                    if (isOperationMatchWithAction(action, existingOperation.getOperationCode())) {
+                        if (AppOperation.InstallState.PENDING.toString().equalsIgnoreCase(existingOperation.getStatus())
+                                || AppOperation.InstallState.IN_PROGRESS.toString()
+                                .equalsIgnoreCase(existingOperation.getStatus())) {
+                            Activity existingActivity = getActivity(existingOperation, device);
+                            ignoredDevices.add(new DeviceWithSubscriptionStatus(new DeviceIdentifier(device.getDeviceIdentifier()
+                                    , device.getType()), getActivityStatus(AppOperation.InstallState.valueOf(existingOperation.getStatus())).toString()));
+                            if (pendingActivities.contains(existingActivity)) {
+                                pendingActivities.get(pendingActivities.indexOf(existingActivity)).getActivityStatus()
+                                        .addAll(existingActivity.getActivityStatus());
+                            } else {
+                                pendingActivities.add(existingActivity);
+                            }
+                        } else {
+                            proceedingDevices.add(device);
+                        }
+                    } else {
+                        proceedingDevices.add(device);
+                    }
+                }
+            } else {
+                proceedingDevices.add(device);
+            }
+        }
+        ApplicationSubscriptionInfoWrapper applicationSubscriptionInfoWrapper = new ApplicationSubscriptionInfoWrapper();
+        applicationSubscriptionInfo.setDevices(proceedingDevices);
+        applicationSubscriptionInfoWrapper.setFilteredSubscriptionInfo(applicationSubscriptionInfo);
+        applicationSubscriptionInfoWrapper.setIgnoredDevices(ignoredDevices);
+        applicationSubscriptionInfoWrapper.setPendingActivities(pendingActivities);
+        return applicationSubscriptionInfoWrapper;
+    }
+
+    /**
+     * Check if an operation is match with the performing action
+     *
+     * @param action Action ex: (INSTALL and UNINSTALL)
+     * @param opCode Operation Code
+     * @return True if the operation is match with the performing action, otherwise false
+     */
+    private boolean isOperationMatchWithAction(String action, String opCode) {
+        if (MDMAppConstants.AndroidConstants.OPCODE_INSTALL_FIRMWARE.equalsIgnoreCase(opCode)
+                || MDMAppConstants.AndroidConstants.OPCODE_INSTALL_APPLICATION.equalsIgnoreCase(opCode)) {
+            return SubAction.INSTALL.toString().equalsIgnoreCase(action);
+        } else {
+            return SubAction.UNINSTALL.toString().equalsIgnoreCase(action);
+        }
+    }
+
+    /**
+     * Generate {@link Activity} from operation and the device
+     *
+     * @param operation {@link DeviceOperationDTO}
+     * @param device    {@link Device}
+     * @return Generated {@link Activity}
+     */
+    private Activity getActivity(DeviceOperationDTO operation, Device device) {
+        Activity activity = new Activity();
+        activity.setActivityId(DeviceManagementConstants.OperationAttributes.ACTIVITY + operation.getOperationId());
+        activity.setOperationId(operation.getOperationId());
+        activity.setCreatedTimeStamp(operation.getActionTriggeredAt().toString());
+        activity.setCode(operation.getOperationCode());
+        DeviceIdentifier deviceIdentifier = new DeviceIdentifier(device.getDeviceIdentifier(), device.getType());
+        List<ActivityStatus> activityStatusList = new ArrayList<>();
+        ActivityStatus activityStatus = new ActivityStatus();
+        activityStatus.setStatus(getActivityStatus(AppOperation.InstallState.valueOf(operation.getStatus())));
+        activityStatus.setDeviceIdentifier(deviceIdentifier);
+        activityStatusList.add(activityStatus);
+        activity.setActivityStatus(activityStatusList);
+        activity.setType(Activity.Type.PROFILE);
+        return activity;
+    }
+
+    /**
+     * Map activity status from subscription side to mdm side
+     *
+     * @param installState {@link AppOperation.InstallState}
+     * @return {@link ActivityStatus.Status}
+     */
+    private ActivityStatus.Status getActivityStatus(AppOperation.InstallState installState) {
+        switch (installState) {
+            case PENDING:
+                return ActivityStatus.Status.PENDING;
+            case IN_PROGRESS:
+                return ActivityStatus.Status.IN_PROGRESS;
+            case INSTALLED:
+            case UNINSTALLED:
+                return ActivityStatus.Status.COMPLETED;
+            case ERROR:
+                return ActivityStatus.Status.ERROR;
+            default:
+                throw new IllegalArgumentException("Unknown installState " + installState);
+        }
     }
 
     private void performExternalStoreSubscription(ApplicationDTO applicationDTO,
@@ -726,25 +857,6 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
     }
 
     /**
-     * Validates if all devices in the subscription have pending operations for the application.
-     *
-     * @param devices List of {@link Device}
-     * @param subscribingDeviceIdHolder Subscribing device id holder.
-     * @throws BadRequestException if incompatible data is found with validate pending app operations request
-     */
-    private <T> void validatePendingAppSubscription(List<Device> devices, SubscribingDeviceIdHolder subscribingDeviceIdHolder) throws BadRequestException{
-        Set<DeviceIdentifier> deviceIdentifiers = devices.stream()
-            .map(device -> new DeviceIdentifier(device.getDeviceIdentifier(), device.getType()))
-            .collect(Collectors.toSet());
-        Set<DeviceIdentifier> skippedDevices = subscribingDeviceIdHolder.getSkippedDevices().keySet();
-        if (skippedDevices.containsAll(deviceIdentifiers) && deviceIdentifiers.containsAll(skippedDevices)) {
-            String msg = "All devices in the subscription have pending operations for this application.";
-            log.error(msg);
-            throw new BadRequestException(msg);
-        }
-    }
-
-    /**
      * This method perform given action (i.e APP INSTALL or APP UNINSTALL) on given set of devices.
      *
      * @param deviceType     Application supported device type.
@@ -774,11 +886,10 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
 
         List<Activity> activityList = new ArrayList<>();
         List<DeviceIdentifier> deviceIdentifiers = new ArrayList<>();
-        List<DeviceIdentifier> ignoredDeviceIdentifiers = new ArrayList<>();
+        List<DeviceWithSubscriptionStatus> ignoredDeviceIdentifiers = new ArrayList<>();
         Map<String, List<DeviceIdentifier>> deviceIdentifierMap = new HashMap<>();
 
         if (SubAction.INSTALL.toString().equalsIgnoreCase(action)) {
-            validatePendingAppSubscription(devices, subscribingDeviceIdHolder);
             deviceIdentifiers.addAll(new ArrayList<>(subscribingDeviceIdHolder.getAppInstallableDevices().keySet()));
             deviceIdentifiers.addAll(new ArrayList<>(subscribingDeviceIdHolder.getAppReInstallableDevices().keySet()));
             if (!isOperationReExecutingDisabled) {
@@ -788,8 +899,8 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
             deviceIdentifiers.addAll(new ArrayList<>(subscribingDeviceIdHolder.getAppInstalledDevices().keySet()));
             deviceIdentifiers
                     .addAll(new ArrayList<>(subscribingDeviceIdHolder.getAppReUnInstallableDevices().keySet()));
-            ignoredDeviceIdentifiers
-                    .addAll(new ArrayList<>(subscribingDeviceIdHolder.getAppInstallableDevices().keySet()));
+            ignoredDeviceIdentifiers.addAll(subscribingDeviceIdHolder.getAppInstallableDevices().keySet().stream()
+                    .map(DeviceWithSubscriptionStatus::new).collect(Collectors.toList()));
         } else {
             String msg = "Found invalid Action: " + action + ". Hence, terminating the application subscribing.";
             log.error(msg);
@@ -819,34 +930,14 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
                         entry.getKey(), action, properties);
                 activityList.add(activity);
                 for (DeviceIdentifier identifier : deviceIdentifiers) {
-                    log.info(String.format("Web app %s triggered", action), appInstallLogContextBuilder
-                            .setAppId(String.valueOf(applicationDTO.getId()))
-                            .setAppName(applicationDTO.getName())
-                            .setAppType(applicationDTO.getType())
-                            .setSubType(subType)
-                            .setTenantId(tenantId)
-                            .setTenantDomain(tenantDomain)
-                            .setDevice(String.valueOf(identifier))
-                            .setUserName(username)
-                            .setAction(action)
-                            .build());
+                    log.info(String.format("Web app %s triggered", action), appInstallLogContextBuilder.setAppId(String.valueOf(applicationDTO.getId())).setAppName(applicationDTO.getName()).setAppType(applicationDTO.getType()).setSubType(subType).setTenantId(tenantId).setTenantDomain(tenantDomain).setDevice(String.valueOf(identifier)).setUserName(username).setAction(action).build());
                 }
             }
         } else {
             Activity activity = addAppOperationOnDevices(applicationDTO, deviceIdentifiers, deviceType, action, properties);
             activityList.add(activity);
             for (DeviceIdentifier identifier : deviceIdentifiers) {
-                log.info(String.format("App %s triggered", action), appInstallLogContextBuilder
-                        .setAppId(String.valueOf(applicationDTO.getId()))
-                        .setAppName(applicationDTO.getName())
-                        .setAppType(applicationDTO.getType())
-                        .setSubType(subType)
-                        .setTenantId(tenantId)
-                        .setTenantDomain(tenantDomain)
-                        .setDevice(String.valueOf(identifier))
-                        .setUserName(username)
-                        .setAction(action)
-                        .build());
+                log.info(String.format("App %s triggered", action), appInstallLogContextBuilder.setAppId(String.valueOf(applicationDTO.getId())).setAppName(applicationDTO.getName()).setAppType(applicationDTO.getType()).setSubType(subType).setTenantId(tenantId).setTenantDomain(tenantDomain).setDevice(String.valueOf(identifier)).setUserName(username).setAction(action).build());
             }
         }
 
@@ -887,7 +978,8 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
             if (deviceSubscriptionDTO != null) {
                 if (Operation.Status.PENDING.toString().equals(deviceSubscriptionDTO.getStatus())
                         || Operation.Status.IN_PROGRESS.toString().equals(deviceSubscriptionDTO.getStatus())) {
-                    subscribingDeviceIdHolder.getSkippedDevices().put(deviceIdentifier, device.getId());
+                    subscribingDeviceIdHolder.getSkippedDevices().put(new DeviceWithSubscriptionStatus(deviceIdentifier
+                            , deviceSubscriptionDTO.getStatus()), device.getId());
                 } else {
                     if (deviceSubscriptionDTO.isUnsubscribed()) {
                         if (!Operation.Status.COMPLETED.toString().equals(deviceSubscriptionDTO.getStatus())) {
@@ -1166,7 +1258,16 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
         try {
             Application application = APIUtil.appDtoToAppResponse(applicationDTO);
             Operation operation = generateOperationPayloadByDeviceType(deviceType, application, action, properties);
-            return deviceManagementProviderService.addOperation(deviceType, operation, deviceIdentifierList);
+            Activity activity = deviceManagementProviderService.addOperation(deviceType, operation, deviceIdentifierList);
+            if (ApplicationType.CUSTOM.toString().equalsIgnoreCase(application.getType())) {
+                operation.setId(activity.getOperationId());
+                operation.setStatus(Operation.Status.PENDING);
+                for (DeviceIdentifier deviceId : deviceIdentifierList) {
+                    deviceManagementProviderService.updateOperation(deviceManagementProviderService
+                            .getDevice(deviceId, false), operation);
+                }
+            }
+            return activity;
         } catch (OperationManagementException e) {
             String msg = "Error occurred while adding the application install operation to devices";
             log.error(msg, e);
@@ -1174,6 +1275,10 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
         } catch (InvalidDeviceException e) {
             //This exception should not occur because the validation has already been done.
             throw new ApplicationManagementException("The list of device identifiers are invalid");
+        } catch (DeviceManagementException e) {
+            String msg = "Error occurred while recording the application install operation responses";
+            log.error(msg, e);
+            throw new ApplicationManagementException(msg, e);
         }
     }
 
@@ -1199,6 +1304,10 @@ public class SubscriptionManagerImpl implements SubscriptionManager {
                     customApplication.setType(application.getType());
                     customApplication.setAppIdentifier(application.getApplicationReleases().get(0).getUuid());
                     customApplication.setUrl(application.getApplicationReleases().get(0).getInstallerPath());
+                    customApplication.setVersion(application.getApplicationReleases().get(0).getVersion());
+                    customApplication.setFirmwarePackageName(application.getApplicationReleases().get(0).getPackageName());
+                    customApplication.setFirmwareVariant(application.getName());
+                    operation.setOperationResponse(customApplication.toJSON());
                     operation.setPayLoad(customApplication.toJSON());
                     return operation;
                 } else {
