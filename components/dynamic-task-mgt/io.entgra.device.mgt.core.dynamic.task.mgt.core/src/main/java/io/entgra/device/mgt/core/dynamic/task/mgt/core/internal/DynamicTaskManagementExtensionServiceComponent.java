@@ -34,6 +34,7 @@ import org.osgi.service.component.annotations.ReferenceCardinality;
 import org.osgi.service.component.annotations.ReferencePolicy;
 import org.wso2.carbon.core.ServerStartupObserver;
 import org.wso2.carbon.stratos.common.listeners.TenantMgtListener;
+import org.wso2.carbon.user.core.service.RealmService;
 
 import java.util.Dictionary;
 import java.util.Hashtable;
@@ -57,7 +58,7 @@ public class DynamicTaskManagementExtensionServiceComponent {
                     DynamicTaskConfigurationManagementServiceImpl.getInstance(), null);
             initiateObserverRegistration(componentContext);
         } catch (Throwable t) {
-            log.error(DynamicTaskManagementExtensionServiceComponent.class.getName() + " initialization is failed.");
+            log.error(DynamicTaskManagementExtensionServiceComponent.class.getName() + " initialization is failed.", t);
         }
     }
 
@@ -69,6 +70,27 @@ public class DynamicTaskManagementExtensionServiceComponent {
                 new DynamicTaskManagementServiceServerStartupObserver(), getStartupObserverServiceDictionary());
         componentContext.getBundleContext().registerService(TenantMgtListener.class,
                 new TenantCreateObserver(), null);
+    }
+
+    @Reference(
+            name = "realm.service",
+            service = org.wso2.carbon.user.core.service.RealmService.class,
+            cardinality = ReferenceCardinality.MANDATORY,
+            policy = ReferencePolicy.DYNAMIC,
+            unbind = "unsetRealmService"
+    )
+    protected void setRealmService(RealmService realmService) {
+        DynamicTaskManagementExtensionServiceDataHolder.getInstance().setRealmService(realmService);
+        if (log.isDebugEnabled()) {
+            log.info(RealmService.class.getName() + " initialized successfully.");
+        }
+    }
+
+    protected void unsetRealmService(RealmService realmService) {
+        DynamicTaskManagementExtensionServiceDataHolder.getInstance().setRealmService(null);
+        if (log.isDebugEnabled()) {
+            log.info(RealmService.class.getName() + " uninitialized successfully.");
+        }
     }
 
     @Reference(

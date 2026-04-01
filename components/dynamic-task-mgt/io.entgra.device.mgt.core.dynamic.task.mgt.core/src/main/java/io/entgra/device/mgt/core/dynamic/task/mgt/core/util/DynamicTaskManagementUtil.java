@@ -102,6 +102,10 @@ public class DynamicTaskManagementUtil {
         }
     }
 
+    public static void addConfigurableDefaultPlatformConfigurationEntryToTenant(String tenantDomain) throws DynamicTaskManagementException {
+        addCategorizedDynamicTaskConfigurations(tenantDomain);
+    }
+
     /**
      * Get default dynamic task configurations.
      *

@@ -38,6 +38,9 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
 import org.wso2.carbon.core.ServerStartupObserver;
+import org.wso2.carbon.user.api.Tenant;
+import org.wso2.carbon.user.api.UserStoreException;
+import org.wso2.carbon.user.core.service.RealmService;
 import org.wso2.carbon.utils.multitenancy.MultitenantConstants;
 
 import java.util.List;
@@ -59,6 +62,8 @@ public class DynamicTaskManagementServiceServerStartupObserver implements Server
             addDefaultConfigurationTemplateToSuperTenant();
             addDefaultConfigurablePlatformConfigurationToSuperTenant();
             scheduleDynamicTasksForSuperTenant();
+            addDefaultConfigurablePlatformConfigurationToSubTenants();
+            scheduleDynamicTasksForSubTenant();
         } catch (DynamicTaskManagementConfigException e) {
             String msg = "Error encountered while retrieving dynamic task configurations.";
             log.error(msg, e);
@@ -81,6 +86,10 @@ public class DynamicTaskManagementServiceServerStartupObserver implements Server
             String msg = "Error encountered while scheduling categorized dynamic tasks for available tenants.";
             log.error(msg, e);
             throw new IllegalStateException(msg, e);
+        } catch (UserStoreException e) {
+            String msg = "Error encountered while getting tenant details.";
+            log.error(msg, e);
+            throw new IllegalStateException(e);
         }
     }
 
@@ -132,6 +141,29 @@ public class DynamicTaskManagementServiceServerStartupObserver implements Server
         }
     }
 
+    private void addDefaultConfigurablePlatformConfigurationToSubTenants() throws UserStoreException,
+            MetadataManagementException, DynamicTaskManagementException {
+        RealmService realmService = DynamicTaskManagementExtensionServiceDataHolder.getInstance().getRealmService();
+        Tenant[] tenantArray = realmService.getTenantManager().getAllTenants();
+
+        for (Tenant tenant : tenantArray) {
+            try {
+                PrivilegedCarbonContext.startTenantFlow();
+                PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantId(tenant.getId());
+                PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantDomain(tenant.getDomain(), true);
+
+                Metadata configurableCategorizedDynamicTaskEntry = metadataManagementService
+                        .retrieveMetadata(tenant.getDomain() +
+                                Constants.CONFIG_PREFIX.CONFIGURABLE_CATEGORIZED_DYNAMIC_TASK_CONFIG_PREFIX);
+                if (configurableCategorizedDynamicTaskEntry == null) {
+                    DynamicTaskManagementUtil.addConfigurableDefaultPlatformConfigurationEntryToTenant(tenant.getDomain());
+                }
+            } finally {
+                PrivilegedCarbonContext.endTenantFlow();
+            }
+        }
+    }
+
     /**
      * Schedule categorized dynamic tasks in super tenant space in initial server startup.
      *
@@ -176,4 +208,63 @@ public class DynamicTaskManagementServiceServerStartupObserver implements Server
             throw new DynamicTaskScheduleException(msg, e);
         }
     }
+
+    private void scheduleDynamicTasksForSubTenant() throws DynamicTaskScheduleException {
+        try {
+            RealmService realmService = DynamicTaskManagementExtensionServiceDataHolder.getInstance().getRealmService();
+            Tenant[] tenantArray = realmService.getTenantManager().getAllTenants();
+
+            for (Tenant tenant : tenantArray) {
+                try {
+                    PrivilegedCarbonContext.startTenantFlow();
+                    PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantId(tenant.getId());
+                    PrivilegedCarbonContext.getThreadLocalCarbonContext().setTenantDomain(tenant.getDomain(), true);
+
+                    DynamicTaskPlatformConfigurations dynamicTaskPlatformConfigurations =
+                            DynamicTaskManagementUtil.getDynamicTaskPlatformConfigurations(tenant.getDomain());
+
+                    // Must be fetched inside tenant context to scope correctly
+                    List<DynamicTask> dynamicTasks =
+                            DynamicTaskManagementExtensionServiceDataHolder.getInstance()
+                                    .getTaskManagementService().getAllDynamicTasks();
+
+                    for (CategorizedDynamicTask categorizedDynamicTask :
+                            dynamicTaskPlatformConfigurations.getCategorizedDynamicTasks()) {
+                        boolean isAlreadyScheduled = false;
+                        for (DynamicTask dynamicTask : dynamicTasks) {
+                            if (Objects.equals(dynamicTask.getName(),
+                                    DynamicTaskManagementUtil.generateTenantAwareNTaskName(tenant.getDomain(),
+                                            categorizedDynamicTask.getCategoryCode()))) {
+                                isAlreadyScheduled = true;
+                                break;
+                            }
+                        }
+                        if (!isAlreadyScheduled) {
+                            DynamicTaskSchedulerUtil.scheduleDynamicTask(categorizedDynamicTask,
+                                    tenant.getId(), tenant.getDomain());
+                        }
+                    }
+                } finally {
+                    PrivilegedCarbonContext.endTenantFlow();
+                }
+            }
+        } catch (NotFoundException e) {
+            String msg = "Dynamic task platform configurations can not be found for a sub-tenant.";
+            log.error(msg, e);
+            throw new DynamicTaskScheduleException(msg, e);
+        } catch (DynamicTaskManagementException e) {
+            String msg = "Error encountered while retrieving dynamic task platform configurations.";
+            log.error(msg, e);
+            throw new DynamicTaskScheduleException(msg, e);
+        } catch (TaskManagementException e) {
+            String msg = "Error encountered while scheduling the categorized dynamic task.";
+            log.error(msg, e);
+            throw new DynamicTaskScheduleException(msg, e);
+        } catch (UserStoreException e) {
+            String msg = "Error encountered while getting tenant details.";
+            log.error(msg, e);
+            throw new DynamicTaskScheduleException(msg, e);
+        }
+    }
+
 }

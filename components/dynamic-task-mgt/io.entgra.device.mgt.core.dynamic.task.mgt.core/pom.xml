@@ -152,6 +152,8 @@
                             org.wso2.carbon.stratos.common.listeners;version="${carbon.commons.version}",
                             org.wso2.carbon.user.core.service;version="${carbon.kernel.version}",
                             org.wso2.carbon.utils;version="${carbon.kernel.version}",
+                            org.wso2.carbon.user.api.*;version="[1.0.1, 2)",
+                            org.wso2.carbon.user.core.tenant;version="${carbon.kernel.version}",
                         </Import-Package>
                         <Export-Package>
                             !io.entgra.device.mgt.core.dynamic.task.mgt.core.internal,
